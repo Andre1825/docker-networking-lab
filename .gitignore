@@ -1,0 +1,20 @@
+# Configuracion local y credenciales
+.env
+.env.*
+!.env.example
+!.env.mysql.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Archivos locales y material del curso
+.vscode/
+.artifacts/
+DOCKER M7.pdf
+*.log
+.DS_Store
+Thumbs.db

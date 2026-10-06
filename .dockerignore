@@ -1,0 +1,14 @@
+.git
+.vscode
+.artifacts
+.env
+.env.*
+__pycache__
+*.py[cod]
+.venv
+venv
+.pytest_cache
+*.log
+*.pdf
+docs
+README.md

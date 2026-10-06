@@ -1,0 +1,47 @@
+# Etapa 1: instalar las dependencias en un entorno virtual.
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN python -m venv /opt/venv
+COPY requirements.txt .
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# Etapa 2: copiar el entorno preparado y la aplicacion.
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Herramientas para practicar diagnostico de red y conectarse a MySQL.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        iputils-ping \
+        bind9-dnsutils \
+        iproute2 \
+        netcat-openbsd \
+        net-tools \
+        traceroute \
+        default-mysql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+COPY app.py .
+COPY templates/ ./templates/
+COPY static/ ./static/
+
+RUN useradd --create-home appuser
+USER appuser
+
+EXPOSE 5000
+
+# Comprobar Flask y MySQL; una respuesta HTTP de error hace fallar la prueba.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/db-health', timeout=7).close()"]
+
+CMD ["python", "app.py"]
