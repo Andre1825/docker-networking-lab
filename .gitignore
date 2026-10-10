@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.mysql.example
+!.env.compose.example
 
 # Python
 __pycache__/

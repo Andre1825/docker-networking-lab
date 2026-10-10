@@ -1,0 +1,196 @@
+name: docker-networking-lab
+
+# Bound each service's log storage without repeating its configuration.
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  proxy:
+    image: nginx:1.30.5-alpine
+    # Run directly with the supplied configuration, without entrypoint rewrites.
+    user: "101:101"
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    init: true
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-5052}:80"
+    volumes:
+      - type: bind
+        source: ./nginx/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - frontend
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    healthcheck:
+      # Exercise Nginx -> Flask -> MySQL, not just the Nginx process.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/db-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+          pids: 64
+    stop_grace_period: 20s
+    logging: *bounded-logging
+
+  app:
+    build:
+      context: .
+      dockerfile: dockerfile-multistage
+      target: runtime
+    image: docker-networking-lab-app:local
+    pull_policy: build
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db_mysql:
+        condition: service_healthy
+    environment:
+      # Service DNS and container port, independent of the published host port.
+      DB_HOST: db_mysql
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:?Set DB_NAME in .env.compose}
+      DB_USER: ${DB_USER:?Set a non-root DB_USER in .env.compose}
+      DB_PASS: ${DB_PASS:?Set DB_PASS in .env.compose}
+      MYSQL_HISTFILE: /tmp/.mysql_history
+    # Replicas share the internal port; only the proxy publishes APP_PORT.
+    networks:
+      - frontend
+      - backend
+    # The Dockerfile already runs the application as appuser.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Preserve the ping exercise without granting the NET_RAW capability.
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+    stop_grace_period: 20s
+    logging: *bounded-logging
+    # Inherits the /db-health HEALTHCHECK from dockerfile-multistage.
+
+  db_mysql:
+    image: mysql:8.4.11
+    init: true
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:?Set DB_NAME in .env.compose}
+      MYSQL_USER: ${DB_USER:?Set a non-root DB_USER in .env.compose}
+      MYSQL_PASSWORD: ${DB_PASS:?Set DB_PASS in .env.compose}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env.compose}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - backend
+    # No ports mapping: MySQL is reachable only through Docker networking.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mysql --protocol=TCP --host=127.0.0.1 --port=3306
+          --user="$${MYSQL_USER}" --password="$${MYSQL_PASSWORD}"
+          --database="$${MYSQL_DATABASE}" --connect-timeout=5
+          --batch --skip-column-names --execute='SELECT 1'
+          >/dev/null 2>&1
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+          pids: 512
+    stop_grace_period: 60s
+    logging: *bounded-logging
+
+  phpmyadmin:
+    image: phpmyadmin:5.2.3
+    profiles:
+      - admin
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db_mysql:
+        condition: service_healthy
+    environment:
+      PMA_HOST: db_mysql
+      PMA_PORT: "3306"
+      PMA_ARBITRARY: "0"
+    ports:
+      - "127.0.0.1:${PHPMYADMIN_PORT:-8081}:80"
+    networks:
+      - backend
+      # Keep localhost publication working without giving Nginx DB access.
+      - administration
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -d
+        - allow_url_fopen=1
+        - -d
+        - default_socket_timeout=5
+        - -r
+        - "exit(@file_get_contents('http://127.0.0.1/') === false ? 1 : 0);"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+    stop_grace_period: 20s
+    logging: *bounded-logging
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+  administration:
+    driver: bridge
+
+volumes:
+  mysql_data:
